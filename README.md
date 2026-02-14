@@ -12,11 +12,11 @@ Click the icon to see a detailed popup:
 
 ## Install
 
-### Option 1: Download .exe (recommended)
+### Option 1: Installer (recommended)
 
-1. Go to [Releases](../../releases) and download `ClaudeTracker.exe`
-2. Run it — the icon appears in your notification area
-3. If the icon is hidden in the overflow (^), right-click the taskbar → **Taskbar settings** → **Other system tray icons** → enable **ClaudeTracker**
+1. Go to [Releases](../../releases) and download `ClaudeTracker-Setup.exe`
+2. Run the installer — choose install location, optional desktop shortcut and Windows startup
+3. To update, just run the new installer over the existing installation
 
 ### Option 2: Run from source
 
@@ -39,17 +39,30 @@ You must be logged into Claude Code — the app reads your OAuth token from `~/.
 - **Popup flyout** — click the icon for detailed usage bars, reset timers, refresh/settings/exit
 - **Tooltip** — hover the icon to see `Claude: 5H 60% | 7D 42%`
 - **Auto-refresh** — polls usage every 60 seconds (configurable)
-- **Start on boot** — optional Windows startup via registry
+- **Start on boot** — optional Windows startup (via installer or app settings)
 - **Settings** — refresh interval, start on boot
 
-## Build .exe
+## Build
+
+### Build .exe only
 
 ```
 uv add pyinstaller --dev
 uv run pyinstaller build.spec
 ```
 
-The output is `dist/ClaudeTracker.exe` — a single standalone file, no install needed.
+Output: `dist/ClaudeTracker.exe`
+
+### Build installer
+
+Requires [Inno Setup](https://jrsoftware.org/isinfo.php).
+
+```
+uv run pyinstaller build.spec
+iscc installer.iss
+```
+
+Output: `Output/ClaudeTracker-Setup.exe`
 
 ## Settings
 

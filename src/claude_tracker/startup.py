@@ -13,7 +13,7 @@ APP_NAME = "ClaudeTracker"
 def _get_exe_path() -> str:
     """Get the path to the running executable or script."""
     if getattr(sys, "frozen", False):
-        return sys.executable
+        return f'"{sys.executable}"'
     return f'"{sys.executable}" -m claude_tracker'
 
 
