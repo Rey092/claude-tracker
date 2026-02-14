@@ -33,15 +33,15 @@ def _get_exe_path() -> str:
     """Get the path to the exe for startup registration."""
     # Running as PyInstaller exe — use the running exe directly
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
+        return f'"{sys.executable}" --startup'
 
     # Running from source — prefer the built/installed exe
     found = _find_installed_exe()
     if found:
-        return f'"{found}"'
+        return f'"{found}" --startup'
 
     # Last resort fallback
-    return f'"{sys.executable}" -m claude_tracker'
+    return f'"{sys.executable}" -m claude_tracker --startup'
 
 
 def is_startup_enabled() -> bool:
