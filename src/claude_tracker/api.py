@@ -13,7 +13,10 @@ log = logging.getLogger(__name__)
 
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# Public OAuth client ID used by Claude Code; the token endpoint rejects
+# refresh requests without it (400 Bad Request).
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 
 @dataclass
@@ -81,19 +84,23 @@ def _save_credentials(oauth: dict) -> None:
 def _refresh_token(oauth: dict) -> dict:
     """Refresh the OAuth access token."""
     log.info("Refreshing OAuth token...")
-    resp = requests.post(
-        TOKEN_URL,
-        json={
-            "grant_type": "refresh_token",
-            "refresh_token": oauth["refreshToken"],
-        },
-        timeout=15,
-    )
+    payload = {
+        "grant_type": "refresh_token",
+        "refresh_token": oauth["refreshToken"],
+        "client_id": CLIENT_ID,
+    }
+    if oauth.get("scopes"):
+        payload["scope"] = " ".join(oauth["scopes"])
+    resp = requests.post(TOKEN_URL, json=payload, timeout=15)
+    if not resp.ok:
+        log.error("Token refresh failed: %s %s", resp.status_code, resp.text[:300])
     resp.raise_for_status()
     new_data = resp.json()
     oauth["accessToken"] = new_data["access_token"]
     oauth["refreshToken"] = new_data.get("refresh_token", oauth["refreshToken"])
     oauth["expiresAt"] = int(time.time() * 1000) + new_data.get("expires_in", 3600) * 1000
+    if new_data.get("scope"):
+        oauth["scopes"] = new_data["scope"].split()
     _save_credentials(oauth)
     return oauth
 
