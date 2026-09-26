@@ -223,9 +223,13 @@ class TrackerWidget:
 
         if self.tray:
             self.tray.update_icon(usage.five_hour.utilization, usage.seven_day.utilization)
-            self.tray.update_tooltip(
-                f"Claude: 5H {usage.five_hour.utilization:.0f}%  |  7D {usage.seven_day.utilization:.0f}%"
-            )
+            if usage.error:
+                # Windows caps tray tooltips at 127 chars
+                self.tray.update_tooltip(f"Claude Tracker: {usage.error}"[:127])
+            else:
+                self.tray.update_tooltip(
+                    f"Claude: 5H {usage.five_hour.utilization:.0f}%  |  7D {usage.seven_day.utilization:.0f}%"
+                )
 
     def start_polling(self) -> None:
         self._poll()

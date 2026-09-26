@@ -66,6 +66,13 @@ def _parse_bucket(data: dict | None) -> UsageBucket:
     )
 
 
+class LoginExpiredError(Exception):
+    """The stored refresh token is expired or revoked; a fresh login is required."""
+
+
+LOGIN_EXPIRED_MESSAGE = "Claude login expired. Run `claude` in a terminal and use /login."
+
+
 def _read_credentials() -> dict:
     if not CREDENTIALS_PATH.exists():
         raise FileNotFoundError(f"Credentials not found at {CREDENTIALS_PATH}")
@@ -83,6 +90,12 @@ def _save_credentials(oauth: dict) -> None:
 
 def _refresh_token(oauth: dict) -> dict:
     """Refresh the OAuth access token."""
+    now_ms = int(time.time() * 1000)
+    refresh_expires_at = oauth.get("refreshTokenExpiresAt")
+    if refresh_expires_at and refresh_expires_at < now_ms:
+        # The endpoint would only answer invalid_grant; don't hammer it every cycle.
+        raise LoginExpiredError("Refresh token expired")
+
     log.info("Refreshing OAuth token...")
     payload = {
         "grant_type": "refresh_token",
@@ -94,11 +107,18 @@ def _refresh_token(oauth: dict) -> dict:
     resp = requests.post(TOKEN_URL, json=payload, timeout=15)
     if not resp.ok:
         log.error("Token refresh failed: %s %s", resp.status_code, resp.text[:300])
+        if resp.status_code in (400, 401) and "invalid_grant" in resp.text:
+            raise LoginExpiredError(resp.text[:300])
     resp.raise_for_status()
     new_data = resp.json()
     oauth["accessToken"] = new_data["access_token"]
     oauth["refreshToken"] = new_data.get("refresh_token", oauth["refreshToken"])
-    oauth["expiresAt"] = int(time.time() * 1000) + new_data.get("expires_in", 3600) * 1000
+    oauth["expiresAt"] = now_ms + new_data.get("expires_in", 3600) * 1000
+    if new_data.get("refresh_token_expires_in"):
+        oauth["refreshTokenExpiresAt"] = now_ms + new_data["refresh_token_expires_in"] * 1000
+    elif "refresh_token" in new_data:
+        # Rotated refresh token with unknown lifetime: drop the stale expiry of the old one.
+        oauth.pop("refreshTokenExpiresAt", None)
     if new_data.get("scope"):
         oauth["scopes"] = new_data["scope"].split()
     _save_credentials(oauth)
@@ -149,6 +169,13 @@ def fetch_usage() -> UsageData:
             five_hour=UsageBucket(0.0, None),
             seven_day=UsageBucket(0.0, None),
             error="No credentials found. Log in to Claude Code first.",
+        )
+    except LoginExpiredError as e:
+        log.error("Login expired: %s", e)
+        return UsageData(
+            five_hour=UsageBucket(0.0, None),
+            seven_day=UsageBucket(0.0, None),
+            error=LOGIN_EXPIRED_MESSAGE,
         )
     except requests.RequestException as e:
         log.error("API request failed: %s", e)
