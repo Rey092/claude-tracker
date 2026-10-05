@@ -1,13 +1,14 @@
-"""Usage API client and token management."""
+"""Claude Code usage provider (OAuth usage API)."""
 
 import json
 import logging
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import requests
+
+from claude_tracker.providers.base import ProviderUsage, UsageBucket
 
 log = logging.getLogger(__name__)
 
@@ -19,51 +20,30 @@ TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 
-@dataclass
-class UsageBucket:
-    utilization: float  # percentage 0-100
-    resets_at: datetime | None
-
-    @property
-    def time_until_reset(self) -> str:
-        if not self.resets_at:
-            return ""
-        now = datetime.now(timezone.utc)
-        delta = self.resets_at - now
-        total_seconds = max(0, int(delta.total_seconds()))
-        if total_seconds == 0:
-            return "now"
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes = remainder // 60
-        if hours >= 24:
-            days = hours // 24
-            remaining_hours = hours % 24
-            return f"~{days}d {remaining_hours}h"
-        if hours > 0:
-            return f"~{hours}h {minutes}m"
-        return f"~{minutes}m"
+PROVIDER_ID = "claude"
 
 
-@dataclass
-class UsageData:
-    five_hour: UsageBucket
-    seven_day: UsageBucket
-    error: str | None = None
-
-
-def _parse_bucket(data: dict | None) -> UsageBucket:
+def _parse_bucket(label: str, short: str, data: dict | None) -> UsageBucket:
     if not data:
-        return UsageBucket(utilization=0.0, resets_at=None)
+        return UsageBucket(label, short, 0.0, None)
     resets_at = None
     if data.get("resets_at"):
         try:
             resets_at = datetime.fromisoformat(data["resets_at"])
         except ValueError:
             pass
-    return UsageBucket(
-        utilization=float(data.get("utilization", 0.0)),
-        resets_at=resets_at,
-    )
+    return UsageBucket(label, short, float(data.get("utilization", 0.0)), resets_at)
+
+
+def parse_usage(data: dict) -> ProviderUsage:
+    return ProviderUsage(PROVIDER_ID, [
+        _parse_bucket("5-hour window", "5H", data.get("five_hour")),
+        _parse_bucket("7-day window", "7D", data.get("seven_day")),
+    ])
+
+
+def _error(message: str) -> ProviderUsage:
+    return ProviderUsage(PROVIDER_ID, [], error=message)
 
 
 class LoginExpiredError(Exception):
@@ -125,8 +105,8 @@ def _refresh_token(oauth: dict) -> dict:
     return oauth
 
 
-def fetch_usage() -> UsageData:
-    """Fetch current usage data from the Anthropic API."""
+def fetch() -> ProviderUsage:
+    """Fetch current Claude usage. Never raises."""
     try:
         oauth = _read_credentials()
 
@@ -156,38 +136,17 @@ def fetch_usage() -> UsageData:
             )
 
         resp.raise_for_status()
-        data = resp.json()
-
-        return UsageData(
-            five_hour=_parse_bucket(data.get("five_hour")),
-            seven_day=_parse_bucket(data.get("seven_day")),
-        )
+        return parse_usage(resp.json())
 
     except FileNotFoundError as e:
         log.error("Credentials file not found: %s", e)
-        return UsageData(
-            five_hour=UsageBucket(0.0, None),
-            seven_day=UsageBucket(0.0, None),
-            error="No credentials found. Log in to Claude Code first.",
-        )
+        return _error("No credentials found. Log in to Claude Code first.")
     except LoginExpiredError as e:
         log.error("Login expired: %s", e)
-        return UsageData(
-            five_hour=UsageBucket(0.0, None),
-            seven_day=UsageBucket(0.0, None),
-            error=LOGIN_EXPIRED_MESSAGE,
-        )
+        return _error(LOGIN_EXPIRED_MESSAGE)
     except requests.RequestException as e:
         log.error("API request failed: %s", e)
-        return UsageData(
-            five_hour=UsageBucket(0.0, None),
-            seven_day=UsageBucket(0.0, None),
-            error=f"API error: {e}",
-        )
+        return _error(f"API error: {e}")
     except Exception as e:
         log.error("Unexpected error: %s", e)
-        return UsageData(
-            five_hour=UsageBucket(0.0, None),
-            seven_day=UsageBucket(0.0, None),
-            error=str(e),
-        )
+        return _error(str(e))

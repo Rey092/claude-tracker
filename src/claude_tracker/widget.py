@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
-from claude_tracker.api import UsageData, fetch_usage
+from claude_tracker.providers import claude
+from claude_tracker.providers.base import ProviderUsage
 from claude_tracker.config import Settings
 from claude_tracker.startup import is_startup_enabled, set_startup
 
@@ -61,7 +62,7 @@ class TrackerWidget:
         self.tray: "TrayManager | None" = None
         self._refresh_job: str | None = None
         self._popup_win: ctk.CTkToplevel | None = None
-        self._last_usage: UsageData | None = None
+        self._last_usage: ProviderUsage | None = None
         self._popup_5h: dict | None = None
         self._popup_7d: dict | None = None
 
@@ -177,10 +178,10 @@ class TrackerWidget:
 
         return {"bar": bar, "pct": pct, "timer": timer}
 
-    def _update_popup(self, usage: UsageData) -> None:
+    def _update_popup(self, usage: ProviderUsage) -> None:
         if not self._popup_win or not self._popup_win.winfo_exists():
             return
-        for bucket, row in [(usage.five_hour, self._popup_5h), (usage.seven_day, self._popup_7d)]:
+        for bucket, row in zip(usage.buckets, [self._popup_5h, self._popup_7d]):
             if row is None:
                 continue
             color = _color_for(bucket.utilization)
@@ -214,21 +215,21 @@ class TrackerWidget:
 
     def refresh(self) -> None:
         log.info("Refreshing usage data...")
-        usage = fetch_usage()
-        self._apply_usage(usage)
+        self._apply_usage(claude.fetch())
 
-    def _apply_usage(self, usage: UsageData) -> None:
+    def _apply_usage(self, usage: ProviderUsage) -> None:
         self._last_usage = usage
         self._update_popup(usage)
 
         if self.tray:
-            self.tray.update_icon(usage.five_hour.utilization, usage.seven_day.utilization)
+            utils = [b.utilization for b in usage.buckets] + [0.0, 0.0]
+            self.tray.update_icon(utils[0], utils[1])
             if usage.error:
                 # Windows caps tray tooltips at 127 chars
                 self.tray.update_tooltip(f"Claude Tracker: {usage.error}"[:127])
             else:
                 self.tray.update_tooltip(
-                    f"Claude: 5H {usage.five_hour.utilization:.0f}%  |  7D {usage.seven_day.utilization:.0f}%"
+                    f"Claude: 5H {utils[0]:.0f}%  |  7D {utils[1]:.0f}%"
                 )
 
     def start_polling(self) -> None:
