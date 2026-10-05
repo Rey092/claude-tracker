@@ -35,7 +35,6 @@ def main() -> None:
 
         from claude_tracker.config import Settings
         from claude_tracker.startup import is_startup_enabled, set_startup
-        from claude_tracker.tray import TrayManager
         from claude_tracker.widget import TrackerWidget
 
         settings = Settings.load()
@@ -47,10 +46,7 @@ def main() -> None:
             set_startup(True)
 
         widget = TrackerWidget(settings)
-        tray = TrayManager(widget)
-        widget.set_tray(tray)
-
-        tray.start()
+        widget.sync_tray_icons()
         widget.start_polling()
         widget.run()
     except Exception:

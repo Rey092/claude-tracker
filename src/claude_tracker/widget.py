@@ -8,18 +8,16 @@ notification area.
 import ctypes
 import ctypes.wintypes
 import logging
+import math
 import tkinter as tk
-from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
-from claude_tracker.providers import claude
-from claude_tracker.providers.base import ProviderUsage
 from claude_tracker.config import Settings
+from claude_tracker.providers import enabled_provider_ids, fetch_provider, tray_provider_ids
+from claude_tracker.providers.base import PROVIDERS, ProviderUsage, UsageBucket
 from claude_tracker.startup import is_startup_enabled, set_startup
-
-if TYPE_CHECKING:
-    from claude_tracker.tray import TrayManager
+from claude_tracker.tray import TrayManager
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +30,10 @@ COLOR_GREEN = "#22c55e"
 COLOR_YELLOW = "#eab308"
 COLOR_RED = "#ef4444"
 COLOR_BAR_BG = "#333333"
+COLOR_WARN = "#fbbf24"
+POPUP_W = 300
+NO_PROVIDERS_MESSAGE = "No providers enabled. Turn one on in Settings."
+WAITING_MESSAGE = "Waiting for data…"
 
 user32 = ctypes.windll.user32
 
@@ -59,12 +61,12 @@ def _get_tray_notify_rect() -> tuple[int, int, int, int] | None:
 class TrackerWidget:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.tray: "TrayManager | None" = None
+        self.trays: dict[str, TrayManager] = {}
         self._refresh_job: str | None = None
         self._popup_win: ctk.CTkToplevel | None = None
-        self._last_usage: ProviderUsage | None = None
-        self._popup_5h: dict | None = None
-        self._popup_7d: dict | None = None
+        self._popup_frame: ctk.CTkFrame | None = None
+        self._popup_content: ctk.CTkFrame | None = None
+        self._last_usage: dict[str, ProviderUsage] = {}
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -99,12 +101,19 @@ class TrackerWidget:
         popup.configure(fg_color=POPUP_BG)
         self._popup_win = popup
 
-        popup_w, popup_h = 300, 220
+        self._build_popup(popup)
+        self._render_popup()
+
+        popup.bind("<FocusOut>", lambda _: self.root.after(200, self._close_popup_if_inactive))
+        popup.after(100, lambda: popup.focus_force())
+
+    def _place_popup(self, popup_h: int) -> None:
+        """Size the popup and anchor it above the notification area."""
+        popup_w = POPUP_W
         scale = self._get_dpi_scale()
         popup_w_phys = int(popup_w * scale)
         popup_h_phys = int(popup_h * scale)
 
-        # Position above the notification area
         tray_rect = _get_tray_notify_rect()
         if tray_rect:
             tray_cx = (tray_rect[0] + tray_rect[2]) // 2
@@ -120,29 +129,19 @@ class TrackerWidget:
         screen_w_phys = int(self.root.winfo_screenwidth() * scale)
         x = max(8, min(x, screen_w_phys - popup_w_phys - 8))
 
-        popup.geometry(f"{popup_w}x{popup_h}+{x}+{y}")
-
-        self._build_popup(popup)
-        if self._last_usage:
-            self._update_popup(self._last_usage)
-
-        popup.bind("<FocusOut>", lambda _: self.root.after(200, self._close_popup_if_inactive))
-        popup.after(100, lambda: popup.focus_force())
+        self._popup_win.geometry(f"{popup_w}x{popup_h}+{x}+{y}")
 
     def _build_popup(self, popup: ctk.CTkToplevel) -> None:
         frame = ctk.CTkFrame(popup, fg_color=POPUP_BG, corner_radius=10,
                              border_width=1, border_color=POPUP_BORDER)
         frame.pack(fill="both", expand=True)
+        self._popup_frame = frame
 
-        ctk.CTkLabel(frame, text="Claude Code Usage",
-                     font=ctk.CTkFont(size=14, weight="bold"),
-                     text_color=COLOR_FG).pack(anchor="w", padx=14, pady=(12, 8))
-
-        self._popup_5h = self._build_popup_row(frame, "5-Hour Window")
-        self._popup_7d = self._build_popup_row(frame, "7-Day Window")
+        self._popup_content = ctk.CTkFrame(frame, fg_color="transparent")
+        self._popup_content.pack(fill="x", pady=(12, 0))
 
         btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=14, pady=(10, 12))
+        btn_frame.pack(side="bottom", fill="x", padx=14, pady=(10, 12))
 
         ctk.CTkButton(btn_frame, text="Refresh", width=70, height=28,
                       command=self.refresh, fg_color="#333344",
@@ -154,48 +153,80 @@ class TrackerWidget:
                       command=self.quit_app, fg_color="#442222",
                       hover_color="#553333", font=ctk.CTkFont(size=11)).pack(side="right")
 
-    def _build_popup_row(self, parent: ctk.CTkFrame, title: str) -> dict:
+    def _render_popup(self) -> None:
+        """Rebuild the provider sections from the latest data and resize."""
+        if not self._popup_win or not self._popup_win.winfo_exists() or not self._popup_content:
+            return
+        for child in self._popup_content.winfo_children():
+            child.destroy()
+
+        ids = enabled_provider_ids(self.settings)
+        if not ids:
+            self._build_message(self._popup_content, NO_PROVIDERS_MESSAGE, COLOR_LABEL)
+        for i, pid in enumerate(ids):
+            if i:
+                ctk.CTkFrame(self._popup_content, height=1, fg_color=POPUP_BORDER).pack(
+                    fill="x", padx=14, pady=6)
+            self._build_section(self._popup_content, pid, self._last_usage.get(pid))
+
+        # Size to what the widgets actually request (physical px) so nothing clips.
+        self._popup_frame.update_idletasks()
+        needed = self._popup_frame.winfo_reqheight()
+        self._place_popup(math.ceil(needed / self._get_dpi_scale()))
+
+    def _build_section(self, parent: ctk.CTkFrame, pid: str, usage: ProviderUsage | None) -> None:
+        meta = PROVIDERS[pid]
+        header = ctk.CTkFrame(parent, fg_color="transparent")
+        header.pack(fill="x", padx=14, pady=(0, 6))
+        ctk.CTkLabel(header, text="■", text_color=meta.accent, width=12,
+                     font=ctk.CTkFont(size=12)).pack(side="left")
+        ctk.CTkLabel(header, text=meta.title, text_color=COLOR_FG,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(4, 0))
+        if usage and usage.subtitle:
+            ctk.CTkLabel(header, text=usage.subtitle, text_color=COLOR_LABEL,
+                         font=ctk.CTkFont(size=10)).pack(side="right")
+
+        if usage is None:
+            self._build_message(parent, WAITING_MESSAGE, COLOR_LABEL)
+        elif usage.error:
+            self._build_message(parent, usage.error, COLOR_WARN)
+        else:
+            for bucket in usage.buckets:
+                self._build_bucket_row(parent, bucket)
+
+    def _build_message(self, parent: ctk.CTkFrame, text: str, color: str) -> None:
+        ctk.CTkLabel(parent, text=text, text_color=color, font=ctk.CTkFont(size=11),
+                     wraplength=POPUP_W - 30, justify="left").pack(anchor="w", padx=14, pady=(0, 6))
+
+    def _build_bucket_row(self, parent: ctk.CTkFrame, bucket: UsageBucket) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=14, pady=(0, 6))
 
         header = ctk.CTkFrame(row, fg_color="transparent")
         header.pack(fill="x")
+        title = f"{bucket.label} · {bucket.detail}" if bucket.detail else bucket.label
         ctk.CTkLabel(header, text=title, font=ctk.CTkFont(size=11),
                      text_color=COLOR_LABEL).pack(side="left")
-        timer = ctk.CTkLabel(header, text="", font=ctk.CTkFont(size=10),
-                             text_color=COLOR_LABEL)
-        timer.pack(side="right")
+        reset = f"resets {bucket.time_until_reset}" if bucket.time_until_reset else ""
+        ctk.CTkLabel(header, text=reset, font=ctk.CTkFont(size=10),
+                     text_color=COLOR_LABEL).pack(side="right")
 
         bar_row = ctk.CTkFrame(row, fg_color="transparent")
         bar_row.pack(fill="x", pady=(2, 0))
-        bar = ctk.CTkProgressBar(bar_row, height=12, corner_radius=4,
-                                 fg_color=COLOR_BAR_BG, progress_color=COLOR_GREEN)
-        bar.set(0)
+        bar = ctk.CTkProgressBar(bar_row, height=12, corner_radius=4, fg_color=COLOR_BAR_BG,
+                                 progress_color=_color_for(bucket.utilization))
+        bar.set(min(1.0, max(0.0, bucket.utilization / 100.0)))
         bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        pct = ctk.CTkLabel(bar_row, text="0%", font=ctk.CTkFont(size=12, weight="bold"),
-                           text_color=COLOR_FG, width=40, anchor="e")
-        pct.pack(side="right")
-
-        return {"bar": bar, "pct": pct, "timer": timer}
-
-    def _update_popup(self, usage: ProviderUsage) -> None:
-        if not self._popup_win or not self._popup_win.winfo_exists():
-            return
-        for bucket, row in zip(usage.buckets, [self._popup_5h, self._popup_7d]):
-            if row is None:
-                continue
-            color = _color_for(bucket.utilization)
-            row["bar"].configure(progress_color=color)
-            row["bar"].set(bucket.utilization / 100.0)
-            row["pct"].configure(text=f"{bucket.utilization:.0f}%")
-            row["timer"].configure(text=f"resets {bucket.time_until_reset}" if bucket.time_until_reset else "")
+        ctk.CTkLabel(bar_row, text=f"{bucket.utilization:.0f}%",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=COLOR_FG, width=40, anchor="e").pack(side="right")
 
     def _close_popup(self) -> None:
         if self._popup_win and self._popup_win.winfo_exists():
             self._popup_win.destroy()
         self._popup_win = None
-        self._popup_5h = None
-        self._popup_7d = None
+        self._popup_frame = None
+        self._popup_content = None
 
     def _close_popup_if_inactive(self) -> None:
         if not self._popup_win or not self._popup_win.winfo_exists():
@@ -210,27 +241,39 @@ class TrackerWidget:
 
     # ── Public API ───────────────────────────────────────────────
 
-    def set_tray(self, tray: "TrayManager") -> None:
-        self.tray = tray
+    def sync_tray_icons(self) -> None:
+        """Start/stop tray icons to match the current settings."""
+        wanted = tray_provider_ids(self.settings)
+        for pid in list(self.trays):
+            if pid not in wanted:
+                self.trays.pop(pid).stop()
+        for pid in wanted:
+            if pid not in self.trays:
+                tray = TrayManager(self, pid)
+                self.trays[pid] = tray
+                tray.show_usage(self._last_usage.get(pid))
+                tray.start()
 
     def refresh(self) -> None:
         log.info("Refreshing usage data...")
-        self._apply_usage(claude.fetch())
+        results = {pid: fetch_provider(pid, self.settings)
+                   for pid in enabled_provider_ids(self.settings)}
+        self._apply_usage(results)
 
-    def _apply_usage(self, usage: ProviderUsage) -> None:
-        self._last_usage = usage
-        self._update_popup(usage)
+    def _apply_usage(self, results: dict[str, ProviderUsage]) -> None:
+        self._last_usage = results
+        self._render_popup()
+        for pid, tray in self.trays.items():
+            tray.show_usage(results.get(pid))
 
-        if self.tray:
-            utils = [b.utilization for b in usage.buckets] + [0.0, 0.0]
-            self.tray.update_icon(utils[0], utils[1])
-            if usage.error:
-                # Windows caps tray tooltips at 127 chars
-                self.tray.update_tooltip(f"Claude Tracker: {usage.error}"[:127])
-            else:
-                self.tray.update_tooltip(
-                    f"Claude: 5H {utils[0]:.0f}%  |  7D {utils[1]:.0f}%"
-                )
+    def apply_settings(self) -> None:
+        """Re-sync icons and restart polling after settings change."""
+        if self._refresh_job:
+            self.root.after_cancel(self._refresh_job)
+            self._refresh_job = None
+        self._last_usage = {}
+        self.sync_tray_icons()
+        self.start_polling()
 
     def start_polling(self) -> None:
         self._poll()
@@ -254,8 +297,8 @@ class TrackerWidget:
         self._close_popup()
         if self._refresh_job:
             self.root.after_cancel(self._refresh_job)
-        if self.tray:
-            self.tray.stop()
+        for tray in self.trays.values():
+            tray.stop()
         self.root.destroy()
 
     def run(self) -> None:
