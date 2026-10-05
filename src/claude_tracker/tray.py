@@ -182,12 +182,17 @@ class TrayManager:
         self._usage: ProviderUsage | None = None
         self._icon: pystray.Icon | None = None
         self._thread: threading.Thread | None = None
+        # Set once the shell has registered the icon (pystray setup callback).
+        self._ready = threading.Event()
+        self._stopped = threading.Event()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
+        if self._stopped.is_set():
+            return
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._on_toggle, default=True),
             pystray.MenuItem("Refresh", self._on_refresh),
@@ -207,15 +212,30 @@ class TrayManager:
             menu=menu,
         )
         threading.Timer(2.0, _promote_tray_icon).start()
-        self._icon.run()
+        self._icon.run(setup=self._on_ready)
 
-    def show_usage(self, usage: ProviderUsage | None) -> None:
-        self._usage = usage
+    def _on_ready(self, icon: pystray.Icon) -> None:
+        # Runs on pystray's setup thread after the icon is registered with its
+        # initial tooltip, so updating the title no longer affects auto-pin.
+        if self._stopped.is_set():
+            icon.stop()
+            return
+        icon.visible = True
+        self._ready.set()
+        self._apply(self._usage)
+
+    def _apply(self, usage: ProviderUsage | None) -> None:
         if self._icon:
             self._icon.icon = _create_split_icon(*icon_values(usage), accent=self._accent)
             self._icon.title = tooltip_for(self.provider_id, usage)
 
+    def show_usage(self, usage: ProviderUsage | None) -> None:
+        self._usage = usage
+        if self._ready.is_set():
+            self._apply(usage)
+
     def stop(self) -> None:
+        self._stopped.set()
         if self._icon:
             self._icon.stop()
 

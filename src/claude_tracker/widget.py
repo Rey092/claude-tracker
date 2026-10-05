@@ -318,6 +318,7 @@ class SettingsDialog:
         self._win.attributes("-topmost", True)
         self._win.configure(fg_color=POPUP_BG)
         self._win.grab_set()
+        self._test_seq = 0  # only the latest Test click may update the status
 
         self._build()
 
@@ -392,14 +393,18 @@ class SettingsDialog:
             self._set_status(nanogpt.NO_KEY_MESSAGE, COLOR_RED)
             return
         self._set_status("Testing…", COLOR_LABEL)
+        self._test_seq += 1
+        seq = self._test_seq
 
         def work() -> None:
             result = nanogpt.fetch(key)
-            self._widget.root.after(0, lambda: self._show_test_result(result))
+            self._widget.root.after(0, lambda: self._show_test_result(seq, result))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _show_test_result(self, result: ProviderUsage) -> None:
+    def _show_test_result(self, seq: int, result: ProviderUsage) -> None:
+        if seq != self._test_seq:
+            return  # a newer test is in flight or already answered
         if result.error:
             self._set_status(result.error, COLOR_RED)
         else:

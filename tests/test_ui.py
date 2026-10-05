@@ -92,3 +92,29 @@ def test_save_strips_key_and_applies(dialog, tracker):
     assert tracker.settings.nanogpt_tray_icon is False
     assert tracker.settings.claude_enabled is False
     assert dialog.applied == [True]
+
+
+def test_stale_key_test_result_is_ignored(dialog, tracker, monkeypatch):
+    from claude_tracker.providers import nanogpt
+
+    started = []
+
+    class DeferredThread:
+        def __init__(self, target, daemon=None):
+            self.target = target
+
+        def start(self):
+            started.append(self.target)
+
+    monkeypatch.setattr(widget_mod.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(nanogpt, "fetch", lambda key: ProviderUsage(
+        "nanogpt", error=None if key == "good" else nanogpt.KEY_REJECTED_MESSAGE))
+
+    dialog._key_var.set("typo")
+    dialog._test_key()
+    dialog._key_var.set("good")
+    dialog._test_key()
+    started[1]()  # newer test answers first...
+    started[0]()  # ...then the stale one
+    tracker.root.update()
+    assert dialog._status.cget("text") == "Connected · active plan"
