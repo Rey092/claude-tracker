@@ -1,4 +1,4 @@
-"""Tk rendering checks for the popup (needs a Windows desktop session)."""
+"""Tk rendering checks for the popup and settings dialog (needs a Windows desktop session)."""
 
 import pytest
 
@@ -50,3 +50,45 @@ def test_popup_fits_long_error(tracker):
         "nanogpt": ProviderUsage("nanogpt", error="NanoGPT key rejected. Update it in Settings."),
     }
     _assert_popup_fits(tracker)
+
+
+@pytest.fixture
+def dialog(tracker, monkeypatch, tmp_path):
+    from claude_tracker import config
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "tracker-settings.json")
+    monkeypatch.setattr(widget_mod, "is_startup_enabled", lambda: False)
+    monkeypatch.setattr(widget_mod, "set_startup", lambda enabled: None)
+    applied = []
+    monkeypatch.setattr(tracker, "apply_settings", lambda: applied.append(True))
+    saved = Settings(**vars(tracker.settings))
+    d = widget_mod.SettingsDialog(tracker)
+    d.applied = applied
+    yield d
+    tracker.settings.__dict__.update(vars(saved))
+    try:
+        d._win.destroy()
+    except Exception:
+        pass
+
+
+def test_save_requires_key_when_nanogpt_enabled(dialog):
+    dialog._nano_var.set(True)
+    dialog._key_var.set("   ")
+    dialog._save()
+    assert dialog._status.cget("text") == "Enter an API key"
+    assert dialog.applied == []
+    assert dialog._win.winfo_exists()
+
+
+def test_save_strips_key_and_applies(dialog, tracker):
+    dialog._nano_var.set(True)
+    dialog._key_var.set("  sk-nano-test\n")
+    dialog._nano_tray_var.set(False)
+    dialog._claude_var.set(False)
+    dialog._save()
+    assert tracker.settings.nanogpt_api_key == "sk-nano-test"
+    assert tracker.settings.nanogpt_enabled is True
+    assert tracker.settings.nanogpt_tray_icon is False
+    assert tracker.settings.claude_enabled is False
+    assert dialog.applied == [True]

@@ -9,12 +9,13 @@ import ctypes
 import ctypes.wintypes
 import logging
 import math
+import threading
 import tkinter as tk
 
 import customtkinter as ctk
 
 from claude_tracker.config import Settings
-from claude_tracker.providers import enabled_provider_ids, fetch_provider, tray_provider_ids
+from claude_tracker.providers import enabled_provider_ids, fetch_provider, nanogpt, tray_provider_ids
 from claude_tracker.providers.base import PROVIDERS, ProviderUsage, UsageBucket
 from claude_tracker.startup import is_startup_enabled, set_startup
 from claude_tracker.tray import TrayManager
@@ -312,13 +313,22 @@ class SettingsDialog:
 
         self._win = ctk.CTkToplevel(widget.root)
         self._win.title("Claude Tracker Settings")
-        self._win.geometry("320x200")
+        self._win.geometry("340x420")
         self._win.resizable(False, False)
         self._win.attributes("-topmost", True)
         self._win.configure(fg_color=POPUP_BG)
         self._win.grab_set()
 
         self._build()
+
+    def _section_header(self, title: str, accent: str, variable: tk.BooleanVar) -> None:
+        row = ctk.CTkFrame(self._win, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(10, 0))
+        ctk.CTkLabel(row, text="■", text_color=accent, width=12).pack(side="left")
+        ctk.CTkLabel(row, text=title, text_color=COLOR_FG,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(4, 0))
+        ctk.CTkCheckBox(row, text="Enabled", variable=variable, text_color=COLOR_FG,
+                        fg_color=COLOR_GREEN, hover_color="#16a34a").pack(side="right")
 
     def _build(self) -> None:
         pad = {"padx": 16, "pady": (8, 0)}
@@ -334,15 +344,73 @@ class SettingsDialog:
                         text_color=COLOR_FG, fg_color=COLOR_GREEN,
                         hover_color="#16a34a").pack(anchor="w", **pad)
 
+        ctk.CTkFrame(self._win, height=1, fg_color=POPUP_BORDER).pack(fill="x", padx=16, pady=(12, 0))
+
+        self._claude_var = tk.BooleanVar(value=self._settings.claude_enabled)
+        self._section_header(PROVIDERS["claude"].title, PROVIDERS["claude"].accent, self._claude_var)
+
+        self._nano_var = tk.BooleanVar(value=self._settings.nanogpt_enabled)
+        self._section_header(PROVIDERS["nanogpt"].title, PROVIDERS["nanogpt"].accent, self._nano_var)
+
+        ctk.CTkLabel(self._win, text="API key", text_color=COLOR_LABEL,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(6, 0))
+        key_row = ctk.CTkFrame(self._win, fg_color="transparent")
+        key_row.pack(fill="x", padx=16, pady=(2, 0))
+        self._key_var = tk.StringVar(value=self._settings.nanogpt_api_key)
+        ctk.CTkEntry(key_row, textvariable=self._key_var, show="•", width=230,
+                     fg_color=COLOR_BAR_BG, text_color=COLOR_FG).pack(side="left")
+        ctk.CTkButton(key_row, text="Test", width=60, command=self._test_key,
+                      fg_color="#333344", hover_color="#444455").pack(side="right")
+
+        self._status = ctk.CTkLabel(self._win, text="", font=ctk.CTkFont(size=11),
+                                    text_color=COLOR_LABEL, wraplength=300, justify="left")
+        self._status.pack(anchor="w", padx=16, pady=(4, 0))
+
+        self._nano_tray_var = tk.BooleanVar(value=self._settings.nanogpt_tray_icon)
+        ctk.CTkCheckBox(self._win, text="Show NanoGPT tray icon", variable=self._nano_tray_var,
+                        text_color=COLOR_FG, fg_color=COLOR_GREEN,
+                        hover_color="#16a34a").pack(anchor="w", **pad)
+
         btn_frame = ctk.CTkFrame(self._win, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=16, pady=16)
+        btn_frame.pack(side="bottom", fill="x", padx=16, pady=16)
         ctk.CTkButton(btn_frame, text="Save", width=80, command=self._save,
                       fg_color=COLOR_GREEN, hover_color="#16a34a",
                       text_color="#000000").pack(side="right", padx=(8, 0))
         ctk.CTkButton(btn_frame, text="Cancel", width=80, command=self._win.destroy,
                       fg_color=COLOR_BAR_BG, hover_color="#45475a").pack(side="right")
 
+    def _set_status(self, text: str, color: str) -> None:
+        try:
+            if self._win.winfo_exists():
+                self._status.configure(text=text, text_color=color)
+        except tk.TclError:
+            pass  # dialog closed while a test was running
+
+    def _test_key(self) -> None:
+        key = self._key_var.get().strip()
+        if not key:
+            self._set_status(nanogpt.NO_KEY_MESSAGE, COLOR_RED)
+            return
+        self._set_status("Testing…", COLOR_LABEL)
+
+        def work() -> None:
+            result = nanogpt.fetch(key)
+            self._widget.root.after(0, lambda: self._show_test_result(result))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_test_result(self, result: ProviderUsage) -> None:
+        if result.error:
+            self._set_status(result.error, COLOR_RED)
+        else:
+            self._set_status("Connected · active plan", COLOR_GREEN)
+
     def _save(self) -> None:
+        key = self._key_var.get().strip()
+        if self._nano_var.get() and not key:
+            self._set_status(nanogpt.NO_KEY_MESSAGE, COLOR_RED)
+            return
+
         try:
             interval = max(30, int(self._interval_var.get()))
             self._settings.refresh_interval = interval
@@ -351,10 +419,11 @@ class SettingsDialog:
 
         set_startup(self._boot_var.get())
         self._settings.start_on_boot = self._boot_var.get()
+        self._settings.claude_enabled = self._claude_var.get()
+        self._settings.nanogpt_enabled = self._nano_var.get()
+        self._settings.nanogpt_api_key = key
+        self._settings.nanogpt_tray_icon = self._nano_tray_var.get()
         self._settings.save()
 
-        if self._widget._refresh_job:
-            self._widget.root.after_cancel(self._widget._refresh_job)
-        self._widget.start_polling()
-
+        self._widget.apply_settings()
         self._win.destroy()
