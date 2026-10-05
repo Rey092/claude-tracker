@@ -110,8 +110,9 @@ today; two short HTTP calls with 15 s timeouts). Results stored as
 - Toggling providers/tray icon in Settings starts/stops icons without restart.
 
 **Risk:** pystray running two `Icon`s, each in its own thread, on win32. Verify first
-during implementation. Fallback if it's unreliable: single icon plus a
-"Tray icon shows: Claude / NanoGPT" setting.
+during implementation. Fallback if it's unreliable: a single icon that rotates
+between enabled providers every 5 s (the left stripe shows which one is displayed;
+tooltip always lists both).
 
 ### Popup
 
