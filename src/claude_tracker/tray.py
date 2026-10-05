@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 
+from claude_tracker.providers.base import PROVIDERS, ProviderUsage
+
 if TYPE_CHECKING:
     from claude_tracker.widget import TrackerWidget
 
@@ -24,22 +26,27 @@ def _color_for(util: float) -> str:
     return "#86efac"  # light green
 
 
+COLOR_NO_DATA = "#d4d4d8"  # light grey when a provider has no data / errored
+
+
 def _create_split_icon(
-    util_5h: float = 0.0,
-    util_7d: float = 0.0,
+    util_top: float | None = None,
+    util_bot: float | None = None,
+    accent: str | None = None,
     size: int = 128,
 ) -> Image.Image:
-    """Generate a square tray icon split into top (5H) and bottom (7D) halves.
+    """Generate a square tray icon split into top and bottom halves.
 
-    Each half is colored by utilization and shows the percentage if it fits.
+    Each half is colored by utilization and shows the percentage; ``None`` draws a
+    grey half with "-". ``accent`` draws a provider stripe on the left edge.
     """
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     r = 6  # corner radius
     half = size // 2
 
-    color_top = _color_for(util_5h)
-    color_bot = _color_for(util_7d)
+    color_top = _color_for(util_top) if util_top is not None else COLOR_NO_DATA
+    color_bot = _color_for(util_bot) if util_bot is not None else COLOR_NO_DATA
 
     # Top half with rounded top corners
     draw.rounded_rectangle([0, 0, size - 1, half], radius=r, fill=color_top)
@@ -54,6 +61,10 @@ def _create_split_icon(
     # Thin separator line
     draw.line([(2, half), (size - 3, half)], fill="#00000066", width=1)
 
+    stripe = size // 10 if accent else 0
+    if accent:
+        draw.rectangle([0, 0, stripe - 1, size - 1], fill=accent)
+
     # Fit percentage text in each half — big and bold, black text
     try:
         font = ImageFont.truetype("arialbd.ttf", size * 2 // 3)
@@ -64,16 +75,36 @@ def _create_split_icon(
             font = ImageFont.load_default()
 
     text_color = "#000000"
-    for util, y_center in [(util_5h, half // 2), (util_7d, half + half // 2)]:
-        text = f"{util:.0f}"
+    for util, y_center in [(util_top, half // 2), (util_bot, half + half // 2)]:
+        text = f"{util:.0f}" if util is not None else "-"
         bbox = draw.textbbox((0, 0), text, font=font)
         tw = bbox[2] - bbox[0]
         th = bbox[3] - bbox[1]
-        tx = (size - tw) // 2 - bbox[0]
+        tx = stripe + (size - stripe - tw) // 2 - bbox[0]
         ty = y_center - th // 2 - bbox[1]
         draw.text((tx, ty), text, fill=text_color, font=font)
 
     return img
+
+
+def icon_values(usage: ProviderUsage | None) -> tuple[float | None, float | None]:
+    """Top/bottom utilization for a provider's icon; (None, None) means grey."""
+    if usage is None or usage.error or not usage.buckets:
+        return None, None
+    top = usage.buckets[0].utilization
+    bot = usage.buckets[1].utilization if len(usage.buckets) > 1 else top
+    return top, bot
+
+
+def tooltip_for(provider_id: str, usage: ProviderUsage | None) -> str:
+    # Windows caps tray tooltips at 127 chars
+    if usage is None:
+        return "Claude Tracker"
+    short = PROVIDERS[provider_id].short
+    if usage.error:
+        return f"{short}: {usage.error}"[:127]
+    parts = [f"{b.short} {b.utilization:.0f}%" for b in usage.buckets[:2]]
+    return f"{short}: {'  |  '.join(parts)}"[:127]
 
 
 def _promote_tray_icon() -> bool:
@@ -106,7 +137,7 @@ def _promote_tray_icon() -> bool:
                     except FileNotFoundError:
                         pass
 
-                    is_ours = (tooltip == "Claude Tracker" or
+                    is_ours = (tooltip.startswith("Claude Tracker") or
                                (path_val and exe_path in path_val.lower()))
 
                     if is_ours:
@@ -144,8 +175,11 @@ def _restart_explorer_tray() -> None:
 
 
 class TrayManager:
-    def __init__(self, widget: "TrackerWidget") -> None:
+    def __init__(self, widget: "TrackerWidget", provider_id: str) -> None:
         self._widget = widget
+        self.provider_id = provider_id
+        self._accent = PROVIDERS[provider_id].accent
+        self._usage: ProviderUsage | None = None
         self._icon: pystray.Icon | None = None
         self._thread: threading.Thread | None = None
 
@@ -162,22 +196,24 @@ class TrayManager:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self._on_exit),
         )
+        suffix = "" if self.provider_id == "claude" else f"_{self.provider_id}"
+        # The initial tooltip is what Windows stores as InitialTooltip; auto-pin
+        # matches on its "Claude Tracker" prefix.
+        title = "Claude Tracker" if self.provider_id == "claude" else f"Claude Tracker {PROVIDERS[self.provider_id].title}"
         self._icon = pystray.Icon(
-            "claude_tracker",
-            icon=_create_split_icon(),
-            title="Claude Tracker",
+            f"claude_tracker{suffix}",
+            icon=_create_split_icon(*icon_values(self._usage), accent=self._accent),
+            title=title,
             menu=menu,
         )
         threading.Timer(2.0, _promote_tray_icon).start()
         self._icon.run()
 
-    def update_icon(self, util_5h: float, util_7d: float) -> None:
+    def show_usage(self, usage: ProviderUsage | None) -> None:
+        self._usage = usage
         if self._icon:
-            self._icon.icon = _create_split_icon(util_5h, util_7d)
-
-    def update_tooltip(self, text: str) -> None:
-        if self._icon:
-            self._icon.title = text
+            self._icon.icon = _create_split_icon(*icon_values(usage), accent=self._accent)
+            self._icon.title = tooltip_for(self.provider_id, usage)
 
     def stop(self) -> None:
         if self._icon:
