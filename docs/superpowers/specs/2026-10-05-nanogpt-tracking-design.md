@@ -109,8 +109,9 @@ today; two short HTTP calls with 15 s timeouts). Results stored as
 - Left-click on any icon toggles the same shared popup; menus identical.
 - Toggling providers/tray icon in Settings starts/stops icons without restart.
 
-**Risk:** pystray running two `Icon`s, each in its own thread, on win32. Verify first
-during implementation. Fallback if it's unreliable: a single icon that rotates
+**Verified (2026-10-05 probe):** two pystray `Icon`s, each in its own thread, register
+and update independently on Windows 11 (pystray gives each instance its own window
+class, hWnd and uID). Fallback, only if field issues appear: a single icon that rotates
 between enabled providers every 5 s (the left stripe shows which one is displayed;
 tooltip always lists both).
 
