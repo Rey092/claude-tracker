@@ -122,9 +122,10 @@ tooltip always lists both).
 - Each bucket row as today; label includes `detail` when present
   ("Weekly tokens · 0.63M / 60M").
 - Section error shown as an amber line under the header, replacing its bars.
-- Popup height computed from content (header + rows + buttons) instead of fixed 220.
-- Window title becomes "Usage" when more than one provider is enabled; stays
-  "Claude Code Usage" otherwise.
+- Popup height computed from content (sections + rows + buttons) instead of fixed 220.
+- The old "Claude Code Usage" title line is dropped; each section header names its
+  provider.
+- A section with no data yet shows "Waiting for data…".
 
 ### Settings dialog
 
